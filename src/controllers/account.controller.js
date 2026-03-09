@@ -13,6 +13,17 @@ const createAccountController = async (req, res) => {
     })
 }
 
+const getUserAccountsController = async (req, res) => {
+    const accounts = await accountModel.find({ user: req.user._id })
+
+    res.status(200).json({
+        message: "Accounts fetched sucessfully",
+        success: true,
+        accounts
+    })
+}
+
 module.exports = {
-    createAccountController
+    createAccountController,
+    getUserAccountsController
 }
