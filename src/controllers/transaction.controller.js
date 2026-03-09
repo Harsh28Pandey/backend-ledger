@@ -2,6 +2,7 @@ const transactionModel = require("../models/transaction.model.js")
 const ledgerModel = require("../models/ledger.model.js")
 const emailService = require('../services/email.service.js')
 const accountModel = require("../models/account.model.js")
+const mongoose = require("mongoose")
 
 /**
  ** - Create a new transaction
@@ -21,7 +22,7 @@ const accountModel = require("../models/account.model.js")
 const createTransaction = async (req, res) => {
 
     /**
-     * - 1. Validate request 
+     ** - 1. Validate request 
     */
     const { fromAccount, toAccount, amount, idempotencyKey } = req.body
     if (!fromAccount || !toAccount || !amount || !idempotencyKey) {
@@ -42,7 +43,7 @@ const createTransaction = async (req, res) => {
     }
 
     /**
-     * - 2. Validate idempotency key
+     ** - 2. Validate idempotency key
     */
     const isTransactionAlreadyExixts = await transactionModel.findOne({ idempotencyKey: idempotencyKey })
 
@@ -78,9 +79,88 @@ const createTransaction = async (req, res) => {
     }
 
     /**
-     * - 3. Check account status
+     ** - 3. Check account status
     */
+    if (fromUserAccount.status !== "ACTIVE" || toUserAccount.status !== "ACTIVE") {
+        return res.status(400).json({
+            message: "Both fromAccount and toAccount must be ACTIVE to process transaction",
+            success: false
+        })
+    }
 
+    /**
+     ** - 4. Derive sender balance from ledger
+    */
+    const balance = await fromUserAccount.getBalance()
+
+    if (balance < amount) {
+        return res.status(400).json({
+            message: `Insufficient balance current balance is ${balance} and requested amount is ${amount}`,
+            success: false
+        })
+    }
+
+
+    /**
+     ** - 5. Create transaction (PENDING)
+    */
+    const session = await mongoose.startSession()
+    session.startTransaction()
+
+    const transaction = (await transactionModel.create({
+        fromAccount,
+        toAccount,
+        amount,
+        idempotencyKey,
+        status: "PENDING"
+    }, { session }))[0]
+
+    /**
+     * - 6. Create DEBIT ledger entry
+    */
+    const creditLedgerEntry = await ledgerModel.create([{
+        account: toAccount,
+        amount: amount,
+        transaction: transaction._id,
+        type: "CREDIT"
+    }], { session })
+
+    /**
+     * - 7. Create CREDIT ledger entry
+    */
+    const debitLedgerEntry = await ledgerModel.create([{
+        account: fromAccount,
+        amount: amount,
+        transaction: transaction._id,
+        type: "DEBIT"
+    }], { session })
+
+    // await (() => {
+    //     return new Promise((resolve) => setTimeout(resolve, 100 * 1000))
+    // })()
+
+    /**
+     * - 8. Mark transaction COMPLETED
+    */
+    transaction.status = "COMPLETED"
+    await transaction.save({ session })
+
+    /**
+     * - 9. Commit MongoDB session
+    */
+    await session.commitTransaction()
+    session.endSession()
+
+    /**
+     * - 10. Send email notification
+    */
+    await emailService.sendTransactionEmail(req.user.email, req.user.name, amount, toAccount)
+
+    return res.status(201).json({
+        message: "Transaction completed successfully",
+        success: true,
+        transaction: transaction
+    })
 
 }
 
@@ -104,6 +184,7 @@ const createInitialFundsTransaction = async (req, res) => {
     }
 
     const fromUserAccount = await accountModel.findOne({
+        // systemUser: true,
         user: req.user._id
     })
 
@@ -118,7 +199,7 @@ const createInitialFundsTransaction = async (req, res) => {
     session.startTransaction()
 
     const transaction = new transactionModel({
-        account: fromUserAccount._id,
+        fromAccount: fromUserAccount._id,
         toAccount,
         amount,
         idempotencyKey,
